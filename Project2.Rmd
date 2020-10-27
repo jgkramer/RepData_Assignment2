@@ -1,0 +1,246 @@
+---
+title: "Analysis of Weather Events with Greatest Health and Economic Impact"
+author: "Jared Kramer"
+date: "10/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Synopsis
+
+In this report, I analyze the NOAA's storm database to address the question of which weather events have 
+the largest impact on population health, and have the largest economic consequences.  
+
+Although the data set runs from 1950 - 2011, I limit the analysis to 1993 - 2011, when the types of events
+coded for expanded from 3 in the early years of the data, to a more complete universe of event types.
+
+To determine the type of events most impactful to population health, for each weather event type I summed 
+the total numbers of (1) deaths and (2) injuries attributable to each weather event type in the 
+data set.  *Tornadoes* and *excessive heat* were the most impactful events to health, being the #1 cause
+of injuries and deaths, respectively (and each ranking high in the other category).  Other significant events in the health category were *flash flood*, *heat*, *lightning*, *flood* and *thunderstorm wind*.  
+
+For economic impact, I totalled the estimates in the Storm Data set for the sum of property and crop damage
+for each weather event type.  *Floods* resulted in the largest economic impact, followed by  
+*hurricane/typhoon*, *storm surge*, *tornado* and *hail.*
+
+  
+## Imports
+
+```{r imports, results = 'hide', message = FALSE}
+library(dplyr)
+library(lubridate)
+```
+
+  
+## Data Processing
+
+We begin by downloading the compressed file from the internet link provided on the coursera assignment page.  `Read.csv2` can read directly from .bz2 type files, so the file does not need to be explictly un-zipped.
+
+For purposes of this analysis, we will retain only the (beginning) date, event type, fatalities and injuries, and the columns related to property and crop damage (to reduce the size of the data set being manipulated).
+
+```{r read_data, cache = TRUE}
+if(!file.exists("StormData.csv.bz2")){
+  download.file("https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2", 
+                destfile = "StormData.csv.bz2")
+}
+
+storm_raw <- read.csv2("StormData.csv.bz2", sep=",")
+storm_data <- storm_raw %>% select(BGN_DATE, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)
+
+dim(storm_data)
+```
+
+Having read in the data, I now  process the contents of the columns from the raw character entries into
+analyzable quantities.  To do this, we first define a function that converts the character in the two
+"exponent" columns to a corresponding number.   
+
+```{r exponent_read}
+exponent <- function(x){
+  if(x == "b") 1e9
+  else if(x == "m") 1e6
+  else if(x == "k") 1e3
+  else if(x == "") 1
+  else NA
+}
+```
+
+
+We do note that there are a few entries that do not correspond to either "B" (billions), "M" (millions),
+"K" (thousands) or "" (which I assume to be 1), or their lower-case equivalents: 
+`r sum(is.na(match(tolower(storm_data$PROPDMGEXP), c("b", "m", "k", ""))))` out of 
+`r length(storm_data$PROPDMGEXP)` total entries in the PROPDMGEXP column, and 
+`r sum(is.na(match(tolower(storm_data$CROPDMGEXP), c("b", "m", "k", ""))))` out of 
+`r length(storm_data$CROPDMGEXP)` in the CROPDMGEXP column.   
+
+While it would be possible to attempt to either interpret these entries (e.g., 5 indicates 10^5), 
+since they are non-compliant with the data instructions and much less than 1% in quantity, 
+I chose not to introduce any new biases and drop these entries from the data set entirely.  
+I do assume that uppercase/lowercase letters are equivalent, and convert all exponent 
+characters to lowercase for processing.
+
+```{r filter_exponents}
+storm_data1 <- storm_data %>% 
+          mutate(PROPDMGEXP = tolower(PROPDMGEXP), CROPDMGEXP = tolower(CROPDMGEXP)) %>%
+          filter(!is.na(match(PROPDMGEXP, c("", "k", "m", "b")))) %>%
+          filter(!is.na(match(CROPDMGEXP, c("", "k", "m", "b"))))
+
+dim(storm_data1)
+```
+
+Next, we process the text fields into analytical data types: 
+
+1. Convert "BGN_DATE" into Date class and then create a "Year" column extracting the year. 
+
+2. Normalize the EVTYPE field by: 
+   (a) converting it to lowercase (which will merge event types that differ only by case)
+   (b) remove leading whitespace (there are a few instances of entries like "waterspout" and "  waterspout" and then converting it into a factor variable, and
+   (c) make an obvious substitution of "tstm" --> "thunderstorm", to ensure that categories that should clearly be the same are not counted separately.  I note that one could make a number of similar "merges" based on the high variety of event-type coding, but this one seemed to be the most obvious as well as most impactful given how high on the economic/health impact lists both versions of this category fell.  
+
+
+3. Convert each of the PROPDMG and CROPDMG fields into numerical data.
+
+4. Use the "exponent" function defined above to convert the "b/m/k" into 1 billion / million / thousand,
+and the blank exponent into 1 (so it can be multiplied by the previous field)
+
+5. Compute a Total_Damage field by combining the individual damage components and multiplying by the appropriate exponent values
+
+6. Convert each of the FATALITIES and INJURIES fields into numerical data.
+
+```{r convert_data, cached = TRUE}
+
+storm_data2 <- storm_data1 %>%
+  mutate(BGN_DATE = as.Date(BGN_DATE, "%m/%d/%Y"), Year = year(BGN_DATE)) %>%
+  mutate(EVTYPE = as.factor(sub("tstm", "thunderstorm", sub("^\\s+", "", tolower(EVTYPE))))) %>%
+  mutate(PROPDMG = as.numeric(PROPDMG), CROPDMG = as.numeric(CROPDMG)) %>%
+  mutate(PROPDMGEXP = sapply(PROPDMGEXP, exponent), CROPDMGEXP = sapply(CROPDMGEXP, exponent)) %>%
+  mutate(Total_Damage = PROPDMG * PROPDMGEXP + CROPDMG * CROPDMGEXP) %>%
+  mutate(FATALITIES = as.numeric(FATALITIES)) %>%
+  mutate(INJURIES = as.numeric(INJURIES))
+
+```
+
+
+Finally, in observing the contents of the data, I noted that for the first several decades of the data set,
+only three event types were coded: Tornado, Tstm Wind, and Hail.  I examined when a more complete set of event types was coded. 
+
+```{r filter_year1}
+grouped_year <- group_by(storm_data2, Year)
+events_by_year <- summarise(grouped_year, types = length(unique(EVTYPE)))
+events_by_year[events_by_year$types > 3, ]
+
+```
+
+Observing that the number of events only began to exceed 3 in the year 1993, I limit the data set 
+being examined to Years 1993 and later, in order to avoid a bias in favor of the three event types
+that were the only kinds coded in earlier years.  Filtering for years 1993 and later may also correspond
+better to current policy objectives -- weather forecasting and communications technology in the most 
+recent years of the data set are likely more consistent with modern conditions (whereas older periods may
+include consequeunces from weather events that are less relevant in today's environment).
+
+```{r filter_year2}
+storm_data3 <- storm_data2 %>%
+  filter(Year >= 1993)
+
+```
+
+Note that limiting the data set to years from and after 1993 results in retaining 
+`r dim(storm_data3)[1] / dim(storm_data2)[1] * 100`% of the entries in the data set. 
+  
+## Results
+
+The data has now been processed to allow analysis of (1) fatalities, (2) injuries and (3) total damage 
+(property plus crop) for each event recorded in the database.   
+
+In this analysis, for each unique event type logged in the data set, I find the sum across ALL events (over all years since 1993) of those three metrics.  I then analyze each of them separately, below. 
+
+```{r summarise}
+summary <- storm_data3 %>%
+  group_by(EVTYPE) %>%
+  summarise(deaths = sum(FATALITIES), injuries = sum(INJURIES), damage = sum(Total_Damage))
+
+firstyear <- min(storm_data3$Year)
+lastyear <- max(storm_data3$Year)
+
+```
+
+  
+### Population Health
+
+The two fields in the data relevant to population health are the number fatalities for each logged, event,
+and the number of injuries. Because of the inherent difficulty in combining these two types of outcomes
+into a single unifying metric (including the absence of details of severity of injuries), 
+I report the results separately. 
+
+Reviewing the results below, however, indicates a substantial overlap in the most health-impactful types
+of events: 
+
+1. *Tornadoes* and *excessive heat* are the most impactful events, with tornadoes causing the most injuries (about 34%) in the data set (and #2 in deaths) and excessive heat causing the most deaths (about 18%) in the data set (and #3 in injuries). 
+
+2.  The remainder of the top 5 in each of the fatality and injury categories significantly overlap as well, including *flash flood*, *heat*, *lightning*, *flood* and *thunderstorm wind*.  The top
+5 event types in each of the fatality and injury metrics represent about 58% and 68% of the fatalities
+and injuries, respectively. 
+
+  
+#### Deaths
+
+The following figure shows the event types in the data set that resulted in the 15 highest total quantity
+of fatalities.   
+
+```{r plot_deaths}
+death_sorted_top <- (summary[order(-summary$deaths), ])[1:15, ]
+par(las = 2, mar = c(4, 12, 2, 2))
+barplot(death_sorted_top$deaths, names.arg = death_sorted_top$EVTYPE, horiz = TRUE, xlab = "Deaths",
+        main = paste0("Top 15 Event Types for Total Deaths from ", firstyear, " to ", lastyear), 
+        cex.main = 0.9)
+```
+
+The top event type (excessive heat) caused 
+`r (death_sorted_top$deaths[1]) / sum(summary$deaths) * 100`% of the deaths.
+The top 5 event types, between them, caused `r (sum(death_sorted_top$deaths[1:5]) / sum(summary$deaths)) * 100`
+% of the total deaths in the database.   
+
+  
+#### Injuries
+
+The following figure shows the event types in the data set that resulted in the 15 highest total quantity
+of injuries.   
+
+```{r plot_injuries}
+injury_sorted_top <- (summary[order(-summary$injuries), ])[1:15, ]
+par(las = 2, mar = c(4, 12, 2, 2))
+barplot(injury_sorted_top$injuries, names.arg = injury_sorted_top$EVTYPE, horiz = TRUE, xlab = "Injuries",        main = paste0("Top 15 Event Types for Total Injuries from ", firstyear, " to ", lastyear), 
+        cex.main = 0.9)
+```
+
+The top event type (tornadoes) caused 
+`r (injury_sorted_top$injuries[1]) / sum(summary$injuries) * 100`% of the injuries.
+The top 5 event types, between them, caused `r (sum(injury_sorted_top$injuries[1:5]) / sum(summary$injuries)) * 100` % of the total injuries in the database.  
+
+  
+### Economic Impact
+
+Because the economic impact of weather events is recorded in terms of monetary property damage and 
+crop damage, these can be combined and presented as a single metric. 
+
+Based on the plot below, it appears that *floods* are the most concerning weather event for economic 
+damage, representing about 34% of the total economic damage in the period measured.  Other events of 
+concern are *hurricane/typhoon*, *storm surge*, *tornado* and *hail.*
+
+The following figure shows the event types in the data set that resulted in the 15 highest total value of 
+economic damage (crop + property).
+
+```{r plot_damage}
+damage_sorted_top <- (summary[order(-summary$damage), ])[1:15, ]
+par(las = 2, mar = c(4, 12, 2, 2))
+barplot(damage_sorted_top$damage/1e9, names.arg = damage_sorted_top$EVTYPE, horiz = TRUE, 
+        xlab = "Estimated Property + Crop Damage ($bn)")
+title(main = paste0("Top 15 Event Types for Total Economic Damage from ", firstyear, " to ", lastyear), 
+      cex.main = 0.9)
+```
+
+The top event type (flood) caused 
+`r (damage_sorted_top$damage[1]) / sum(summary$damage) * 100`% of the economic damage in the data set.
+The top 5 event types, between them, caused `r (sum(damage_sorted_top$damage[1:5]) / sum(summary$damage)) * 100` % of the total economic damage in the database.  
